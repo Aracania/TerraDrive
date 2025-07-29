@@ -1,6 +1,6 @@
 % ========== INITIAL SETUP ==========
-
 delete(instrfindall);  % Clear any previous serial connections
+
 arduinoCom = serial('COM9', 'BaudRate', 9600);
 fopen(arduinoCom);
 pause(2);  % Give Arduino time to initialize
@@ -10,16 +10,15 @@ latRef = 7.214971;
 lonRef = 124.248697;
 R = 6371000;  % Earth's radius in meters
 
-% Convert reference lat/lon to radians once
 lat0_rad = deg2rad(latRef);
 lon0_rad = deg2rad(lonRef);
 
-% Define your desired path in local X, Y, Z
+% Desired waypoints
 pointx = [3.48412, 7.00530, 10.56354, 14.08472, 17.60590, 21.12709];
 pointy = [-2.63162, -5.22617, -7.85779, -10.45235, -13.08397, -15.67852];
 pointz = [-36.86990, -36.57303, -36.86990, -35.70669, -36.86990, -36.57303];
 
-% Interpolant to get terrain elevation at any (x, y)
+% Interpolant for terrain elevation
 F = scatteredInterpolant(pointx', pointy', pointz', 'linear', 'nearest');
 
 % Load fuzzy inference system
@@ -32,9 +31,9 @@ for i = 1:length(pointx)
     
     % -- Wait for GPS input from Arduino --
     flushinput(arduinoCom);  % Clear serial buffer
-    pause(0.5);  % Give time for Arduino to send data
+    pause(0.5);
 
-    gpsLine = fgetl(arduinoCom);  % Read GPS data, format: 'lat,lon\n'
+    gpsLine = fgetl(arduinoCom);  % Expecting: 'lat,lon\n'
 
     % Safety check
     if isempty(gpsLine) || ~contains(gpsLine, ',')
@@ -43,8 +42,19 @@ for i = 1:length(pointx)
     end
 
     gpsParts = strsplit(strtrim(gpsLine), ',');
+    
+    if numel(gpsParts) < 2
+        warning('Incomplete GPS data received. Skipping...');
+        continue;
+    end
+
     currentlat = str2double(gpsParts{1});
     currentlon = str2double(gpsParts{2});
+
+    if isnan(currentlat) || isnan(currentlon)
+        warning('Non-numeric GPS values. Skipping...');
+        continue;
+    end
 
     % -- Convert to local X, Y --
     clat_rad = deg2rad(currentlat);
@@ -54,22 +64,24 @@ for i = 1:length(pointx)
     currenty = R * (clat_rad - lat0_rad);
     currentz = F(currentx, currenty);  % Estimate Z
 
-    % -- Evaluate Fuzzy Logic --
+    % -- Fuzzy Logic Evaluation --
     fuzzyInput = [currentx, currenty, currentz];
-    output = evalfis(fis, fuzzyInput);
+    output = evalfis(fis, fuzzyInput);  % [yL, yR]
 
-    % -- Send result to Arduino --
-    % Assuming the output is a single value (e.g., speed, PWM, etc.)
-    fprintf(arduinoCom, '%s\n', num2str(output));  % Send control signal
-    fprintf('Current [x,y,z] = [%.2f, %.2f, %.2f], Output = %.2f\n', ...
-        currentx, currenty, currentz, output);
+    % -- Send Output to Arduino --
+    fprintf(arduinoCom, '%.2f,%.2f\n', output(1), output(2));
+    
+    % -- Print Status --
+    fprintf('Current [x,y,z] = [%.2f, %.2f, %.2f], yL = %.2f, yR = %.2f\n', ...
+        currentx, currenty, currentz, output(1), output(2));
 
-    % -- Wait before next waypoint or check if arrived (optional) --
-    pause(1);  % Can be changed depending on travel speed
+    pause(1);  % Adjust depending on speed and distance
 
 end
 
-% ========== CLOSE SERIAL ==========
-
+% ========== CLOSE ==========
 fclose(arduinoCom);
+delete(arduinoCom);
+clear arduinoCom;
+
 disp('Navigation complete. Serial connection closed.');
