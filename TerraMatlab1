@@ -1,87 +1,73 @@
-% ========== INITIAL SETUP ==========
-delete(instrfindall);  % Clear any previous serial connections
+% ========== SETUP ==========
+u = udpport("datagram", "IPV4");
 
-arduinoCom = serial('COM9', 'BaudRate', 9600);
-fopen(arduinoCom);
-pause(2);  % Give Arduino time to initialize
+esp32IP = "192.168.4.1";   % Default ESP32 Access Point IP
+esp32Port = 4210;          % You must match this port with ESP32 code
+localPort = 4321;          % MATLAB's port to listen for data
 
-% Reference latitude and longitude (your origin)
+configureCallback(u, "off");  % Disable any old callbacks
+
+% Reference GPS (origin)
 latRef = 7.214971;
 lonRef = 124.248697;
-R = 6371000;  % Earth's radius in meters
-
+R = 6371000;  % Earth radius in meters
 lat0_rad = deg2rad(latRef);
 lon0_rad = deg2rad(lonRef);
 
-% Desired waypoints
+% Desired path (local x, y, z)
 pointx = [3.48412, 7.00530, 10.56354, 14.08472, 17.60590, 21.12709];
 pointy = [-2.63162, -5.22617, -7.85779, -10.45235, -13.08397, -15.67852];
 pointz = [-36.86990, -36.57303, -36.86990, -35.70669, -36.86990, -36.57303];
 
-% Interpolant for terrain elevation
+% Interpolant
 F = scatteredInterpolant(pointx', pointy', pointz', 'linear', 'nearest');
 
-% Load fuzzy inference system
+% Load fuzzy system
 fis = readfis('sugenotype1.fis');
 
-% ========== MAIN LOOP FOR EACH WAYPOINT ==========
+% ========== MAIN LOOP ==========
 for i = 1:length(pointx)
 
-    fprintf('\nMoving to waypoint #%d...\n', i);
-    
-    % -- Wait for GPS input from Arduino --
-    flushinput(arduinoCom);  % Clear serial buffer
-    pause(0.5);
+    fprintf("Waiting for GPS from ESP32...\n");
 
-    gpsLine = fgetl(arduinoCom);  % Expecting: 'lat,lon\n'
+    % Wait for data from ESP32
+    gpsData = read(u, 1, "string", "Timeout", 5);
 
-    % Safety check
-    if isempty(gpsLine) || ~contains(gpsLine, ',')
-        warning('Invalid GPS data received. Skipping this loop...');
+    if isempty(gpsData)
+        warning("No data received. Skipping...");
         continue;
     end
 
-    gpsParts = strsplit(strtrim(gpsLine), ',');
-    
-    if numel(gpsParts) < 2
-        warning('Incomplete GPS data received. Skipping...');
+    gpsLine = gpsData.Data;  % e.g., "7.215012,124.248900"
+    gpsParts = strsplit(strtrim(gpsLine), ",");
+
+    if length(gpsParts) ~= 2
+        warning("Malformed data: %s", gpsLine);
         continue;
     end
 
-    currentlat = str2double(gpsParts{1});
-    currentlon = str2double(gpsParts{2});
+    currentLat = str2double(gpsParts{1});
+    currentLon = str2double(gpsParts{2});
 
-    if isnan(currentlat) || isnan(currentlon)
-        warning('Non-numeric GPS values. Skipping...');
-        continue;
-    end
-
-    % -- Convert to local X, Y --
-    clat_rad = deg2rad(currentlat);
-    clon_rad = deg2rad(currentlon);
+    % Convert to local coordinates
+    clat_rad = deg2rad(currentLat);
+    clon_rad = deg2rad(currentLon);
 
     currentx = R * (clon_rad - lon0_rad) * cos(lat0_rad);
     currenty = R * (clat_rad - lat0_rad);
-    currentz = F(currentx, currenty);  % Estimate Z
+    currentz = F(currentx, currenty);
 
-    % -- Fuzzy Logic Evaluation --
     fuzzyInput = [currentx, currenty, currentz];
-    output = evalfis(fis, fuzzyInput);  % [yL, yR]
+    output = evalfis(fis, fuzzyInput);  % [leftPWM, rightPWM]
 
-    % -- Send Output to Arduino --
-    fprintf(arduinoCom, '%.2f,%.2f\n', output(1), output(2));
-    
-    % -- Print Status --
-    fprintf('Current [x,y,z] = [%.2f, %.2f, %.2f], yL = %.2f, yR = %.2f\n', ...
-        currentx, currenty, currentz, output(1), output(2));
+    % Send back control to ESP32
+    controlMsg = sprintf('%.2f,%.2f', output(1), output(2));
+    write(u, controlMsg, "string", esp32IP, esp32Port);
 
-    pause(1);  % Adjust depending on speed and distance
-
+    fprintf("Sent to ESP32: %s\n", controlMsg);
+    pause(1);  % optional delay
 end
 
-% ========== CLOSE ==========
-fclose(arduinoCom);
-delete(arduinoCom);
-clear arduinoCom;
-
-disp('Navigation complete. Serial connection closed.');
+% ========== CLEANUP ==========
+clear u;
+disp("Finished and closed UDP port.");
