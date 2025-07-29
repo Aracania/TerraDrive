@@ -1,0 +1,49 @@
+#include <WiFi.h>
+#include <WiFiClient.h>
+
+#define BAUD_RATE 9600           // Match this with Arduino baud
+#define SERIAL_PORT Serial1      // Serial1 on ESP32: RX=9, TX=10 (or adjust based on wiring)
+
+const char* ssid = "ESP32-AP";
+const char* password = "12345678";
+
+WiFiServer server(1234);         // TCP server on port 1234
+WiFiClient client;
+
+void setup() {
+  // Start serial for debugging
+  Serial.begin(115200);
+  SERIAL_PORT.begin(BAUD_RATE);  // Start Serial1 for Arduino connection
+
+  // Create WiFi access point
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("ESP32 AP IP address: ");
+  Serial.println(IP);
+
+  server.begin();
+}
+
+void loop() {
+  // Accept client (MATLAB)
+  if (!client || !client.connected()) {
+    client = server.available();
+    return;
+  }
+
+  // ========== Forward GPS data from Arduino to MATLAB ==========
+  if (SERIAL_PORT.available()) {
+    String gpsData = SERIAL_PORT.readStringUntil('\n');  // Read line from Arduino
+    client.println(gpsData);  // Send to MATLAB
+    Serial.print("Sent to MATLAB: ");
+    Serial.println(gpsData);
+  }
+
+  // ========== Forward control command from MATLAB to Arduino ==========
+  if (client.available()) {
+    String controlData = client.readStringUntil('\n');  // Read control line from MATLAB
+    SERIAL_PORT.println(controlData);  // Send to Arduino
+    Serial.print("Sent to Arduino: ");
+    Serial.println(controlData);
+  }
+}
